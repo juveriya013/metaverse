@@ -1,0 +1,738 @@
+import tkinter as tk
+from tkinter import ttk, colorchooser, messagebox, font
+import math
+import random
+import time
+import json
+import os
+from dataclasses import dataclass, field, asdict
+from typing import Optional
+import threading
+
+
+# ─────────────────────────────────────────────
+#  DATA MODELS
+# ─────────────────────────────────────────────
+
+@dataclass
+class AvatarAppearance:
+    name: str = "User"
+    skin_color: str = "#FDBCB4"
+    hair_color: str = "#3B1F0A"
+    eye_color: str = "#4A90D9"
+    outfit_color: str = "#2C3E50"
+    accessory_color: str = "#F1C40F"
+    height: float = 1.0          # scale factor 0.5 – 1.5
+    body_type: str = "medium"    # slim / medium / athletic
+    hair_style: str = "short"    # bald / short / long / curly
+    accessory: str = "none"      # none / hat / glasses / wings / halo
+    special_effect: str = "none" # none / glow / fire / ice / star
+
+@dataclass
+class PhysicsState:
+    x: float = 400.0
+    y: float = 300.0
+    vx: float = 0.0
+    vy: float = 0.0
+    antigravity_level: float = 0.0   # 0 = normal gravity, 1 = full anti
+    on_ground: bool = True
+    floating: bool = False
+    boost_active: bool = False
+    trail: list = field(default_factory=list)
+
+@dataclass
+class World:
+    gravity: float = 9.8
+    air_resistance: float = 0.98
+    ground_y: float = 500.0
+    platforms: list = field(default_factory=list)
+    energy_orbs: list = field(default_factory=list)
+
+# ─────────────────────────────────────────────
+#  AVATAR RENDERER
+# ─────────────────────────────────────────────
+
+class AvatarRenderer:
+    """Draws the avatar on a Tkinter canvas."""
+
+    def __init__(self, canvas: tk.Canvas):
+        self.canvas = canvas
+        self._ids: list = []
+
+    def clear(self):
+        for _id in self._ids:
+            self.canvas.delete(_id)
+        self._ids.clear()
+
+    def _c(self, *args, **kwargs):
+        """Helper – create item and track id."""
+        _id = args[0](*args[1:], **kwargs)
+        self._ids.append(_id)
+        return _id
+
+    def draw(self, appearance: AvatarAppearance, physics: PhysicsState):
+        self.clear()
+        c = self.canvas
+        x, y = physics.x, physics.y
+        s = appearance.height          # scale
+        sc = appearance.skin_color
+        hc = appearance.hair_color
+        ec = appearance.eye_color
+        oc = appearance.outfit_color
+        ac = appearance.accessory_color
+        fx = appearance.special_effect
+        bt = appearance.body_type
+
+        # ── Trail ──────────────────────────────
+        if physics.floating or physics.boost_active:
+            for i, (tx, ty) in enumerate(physics.trail[-12:]):
+                alpha = int(255 * (i / 12) * 0.4)
+                col = f"#{alpha:02x}c8ff"
+                r = 4 * (i / 12)
+                self._c(c.create_oval,
+                        tx - r, ty - r, tx + r, ty + r,
+                        fill=col, outline="")
+
+        # ── Special effect (glow ring) ─────────
+        if fx == "glow":
+            for r in range(35, 10, -5):
+                self._c(c.create_oval,
+                        x - r*s, y - r*s*2, x + r*s, y + r*s*0.5,
+                        fill="", outline="#00FFAA",
+                        width=1, stipple="gray25")
+        elif fx == "fire":
+            for i in range(8):
+                fx_x = x + random.randint(-12, 12) * s
+                fx_y = y + random.randint(10, 30) * s
+                self._c(c.create_oval,
+                        fx_x - 5*s, fx_y - 5*s, fx_x + 5*s, fx_y + 5*s,
+                        fill=random.choice(["#FF4500", "#FF6600", "#FFD700"]),
+                        outline="")
+        elif fx == "ice":
+            for i in range(6):
+                angle = i * 60
+                ex = x + math.cos(math.radians(angle)) * 28 * s
+                ey = y - 10*s + math.sin(math.radians(angle)) * 20 * s
+                self._c(c.create_line,
+                        x, y - 10*s, ex, ey,
+                        fill="#A0E8FF", width=2)
+        elif fx == "star":
+            for i in range(5):
+                angle = i * 72 + time.time() * 60 % 360
+                ex = x + math.cos(math.radians(angle)) * 32 * s
+                ey = y - 15*s + math.sin(math.radians(angle)) * 22 * s
+                self._c(c.create_oval,
+                        ex - 3, ey - 3, ex + 3, ey + 3,
+                        fill="#FFD700", outline="")
+
+        # ── Body widths by type ────────────────
+        bw = {"slim": 0.8, "medium": 1.0, "athletic": 1.2}.get(bt, 1.0)
+
+        # ── Legs ───────────────────────────────
+        leg_w = int(6 * s * bw)
+        self._c(c.create_rectangle,
+                x - 12*s*bw, y + 10*s, x - 4*s*bw, y + 35*s,
+                fill=oc, outline="#000", width=1)
+        self._c(c.create_rectangle,
+                x + 4*s*bw, y + 10*s, x + 12*s*bw, y + 35*s,
+                fill=oc, outline="#000", width=1)
+
+        # ── Torso ──────────────────────────────
+        self._c(c.create_rectangle,
+                x - 16*s*bw, y - 20*s, x + 16*s*bw, y + 12*s,
+                fill=oc, outline="#000", width=1)
+
+        # ── Arms ───────────────────────────────
+        arm_angle = math.sin(time.time() * 3) * 10 if physics.floating else 0
+        # left arm
+        self._c(c.create_line,
+                x - 16*s*bw, y - 15*s,
+                x - 28*s*bw, y - 5*s + arm_angle,
+                fill=sc, width=int(7*s*bw), capstyle=tk.ROUND)
+        # right arm
+        self._c(c.create_line,
+                x + 16*s*bw, y - 15*s,
+                x + 28*s*bw, y - 5*s - arm_angle,
+                fill=sc, width=int(7*s*bw), capstyle=tk.ROUND)
+
+        # ── Head ───────────────────────────────
+        hx1, hy1 = x - 18*s, y - 52*s
+        hx2, hy2 = x + 18*s, y - 18*s
+        self._c(c.create_oval, hx1, hy1, hx2, hy2,
+                fill=sc, outline="#333", width=1)
+
+        # ── Hair ───────────────────────────────
+        hs = appearance.hair_style
+        if hs == "short":
+            self._c(c.create_arc, hx1, hy1, hx2, hy2 - 5*s,
+                    start=0, extent=180, fill=hc, outline="")
+        elif hs == "long":
+            self._c(c.create_arc, hx1 - 2*s, hy1, hx2 + 2*s, hy2,
+                    start=0, extent=180, fill=hc, outline="")
+            self._c(c.create_rectangle,
+                    hx1 - 2*s, hy1 + 10*s, hx1 + 4*s, hy2 + 20*s,
+                    fill=hc, outline="")
+            self._c(c.create_rectangle,
+                    hx2 - 4*s, hy1 + 10*s, hx2 + 2*s, hy2 + 20*s,
+                    fill=hc, outline="")
+        elif hs == "curly":
+            for cx_ in range(-2, 3):
+                self._c(c.create_oval,
+                        x + cx_*8*s - 7*s, hy1 - 4*s,
+                        x + cx_*8*s + 7*s, hy1 + 12*s,
+                        fill=hc, outline="")
+        # bald = no hair drawn
+
+        # ── Eyes ───────────────────────────────
+        self._c(c.create_oval,
+                x - 11*s, y - 44*s, x - 4*s, y - 37*s,
+                fill=ec, outline="#000", width=1)
+        self._c(c.create_oval,
+                x + 4*s, y - 44*s, x + 11*s, y - 37*s,
+                fill=ec, outline="#000", width=1)
+        # pupils
+        self._c(c.create_oval,
+                x - 9*s, y - 43*s, x - 6*s, y - 40*s,
+                fill="#000")
+        self._c(c.create_oval,
+                x + 6*s, y - 43*s, x + 9*s, y - 40*s,
+                fill="#000")
+
+        # ── Smile ──────────────────────────────
+        self._c(c.create_arc,
+                x - 8*s, y - 36*s, x + 8*s, y - 24*s,
+                start=200, extent=140, style=tk.ARC, outline="#333", width=2)
+
+        # ── Accessories ────────────────────────
+        acc = appearance.accessory
+        if acc == "hat":
+            self._c(c.create_rectangle,
+                    x - 20*s, hy1 - 4*s, x + 20*s, hy1 + 4*s,
+                    fill=ac, outline="#000")
+            self._c(c.create_rectangle,
+                    x - 12*s, hy1 - 24*s, x + 12*s, hy1 - 4*s,
+                    fill=ac, outline="#000")
+        elif acc == "glasses":
+            self._c(c.create_oval,
+                    x - 14*s, y - 46*s, x - 3*s, y - 35*s,
+                    fill="", outline=ac, width=2)
+            self._c(c.create_oval,
+                    x + 3*s, y - 46*s, x + 14*s, y - 35*s,
+                    fill="", outline=ac, width=2)
+            self._c(c.create_line,
+                    x - 3*s, y - 41*s, x + 3*s, y - 41*s,
+                    fill=ac, width=2)
+        elif acc == "wings":
+            # left wing
+            pts_l = [x - 20*s, y - 10*s,
+                     x - 55*s, y - 35*s,
+                     x - 45*s, y + 5*s,
+                     x - 20*s, y - 5*s]
+            self._c(c.create_polygon, pts_l, fill=ac, outline="#FFF", width=1)
+            # right wing
+            pts_r = [x + 20*s, y - 10*s,
+                     x + 55*s, y - 35*s,
+                     x + 45*s, y + 5*s,
+                     x + 20*s, y - 5*s]
+            self._c(c.create_polygon, pts_r, fill=ac, outline="#FFF", width=1)
+        elif acc == "halo":
+            self._c(c.create_oval,
+                    x - 20*s, hy1 - 18*s, x + 20*s, hy1 - 6*s,
+                    fill="", outline=ac, width=4)
+
+        # ── Antigravity energy bar ─────────────
+        if physics.antigravity_level > 0:
+            bar_w = int(40 * physics.antigravity_level)
+            self._c(c.create_rectangle,
+                    x - 20, y - 65*s - 12, x + 20, y - 65*s - 4,
+                    fill="#222", outline="#555")
+            self._c(c.create_rectangle,
+                    x - 20, y - 65*s - 12, x - 20 + bar_w, y - 65*s - 4,
+                    fill="#00FFAA", outline="")
+
+# ─────────────────────────────────────────────
+#  PHYSICS ENGINE
+# ─────────────────────────────────────────────
+
+class AntigravityEngine:
+    FPS = 60
+    DT = 1.0 / FPS
+
+    def __init__(self, world: World):
+        self.world = world
+
+    def step(self, state: PhysicsState):
+        w = self.world
+        g_eff = w.gravity * (1.0 - state.antigravity_level)
+        # vertical physics
+        state.vy += g_eff * self.DT * 60
+        state.vy *= w.air_resistance
+        state.vx *= w.air_resistance
+
+        state.x += state.vx
+        state.y += state.vy
+
+        # ground collision
+        if state.y >= w.ground_y:
+            state.y = w.ground_y
+            state.vy = 0
+            state.on_ground = True
+        else:
+            state.on_ground = False
+
+        # platform collisions
+        for plat in w.platforms:
+            px, py, pw, ph = plat
+            if (px <= state.x <= px + pw and
+                    py - 5 <= state.y <= py + ph and
+                    state.vy >= 0):
+                state.y = py
+                state.vy = 0
+                state.on_ground = True
+
+        # world bounds
+        state.x = max(20, min(780, state.x))
+
+        # floating flag
+        state.floating = not state.on_ground
+
+        # trail
+        if state.floating or state.boost_active:
+            state.trail.append((state.x, state.y + 20))
+            if len(state.trail) > 20:
+                state.trail.pop(0)
+        else:
+            if state.trail:
+                state.trail.pop(0)
+
+        return state
+
+    def apply_boost(self, state: PhysicsState):
+        state.vy = -18 * (0.5 + state.antigravity_level)
+        state.boost_active = True
+        threading.Timer(0.3, lambda: setattr(state, "boost_active", False)).start()
+
+# ─────────────────────────────────────────────
+#  MAIN APPLICATION
+# ─────────────────────────────────────────────
+
+class MetaUniverseApp:
+    SAVE_FILE = "avatar_save.json"
+    WINDOW_W, WINDOW_H = 1100, 680
+
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("🌌 MetaUniverse – Antigravity Platform")
+        self.root.configure(bg="#0A0A1A")
+        self.root.resizable(False, False)
+
+        self.appearance = AvatarAppearance()
+        self.physics = PhysicsState(x=200, y=480)
+        self.world = World(ground_y=540)
+        self.world.platforms = [
+            (80, 430, 120, 10),
+            (250, 370, 100, 10),
+            (420, 300, 130, 10),
+            (600, 360, 110, 10),
+            (680, 230, 90, 10),
+        ]
+        self.world.energy_orbs = [
+            [150, 410, True], [310, 350, True],
+            [490, 280, True], [660, 340, True], [730, 210, True],
+        ]
+        self.engine = AntigravityEngine(self.world)
+        self._running = True
+        self._keys: set = set()
+        self._score = 0
+        self._antigravity_energy = 100.0
+
+        self._build_ui()
+        self._load_avatar()
+        self._start_loop()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.mainloop()
+
+    # ── UI CONSTRUCTION ─────────────────────
+    def _build_ui(self):
+        root = self.root
+
+        # Left panel – game canvas
+        left = tk.Frame(root, bg="#0A0A1A")
+        left.pack(side=tk.LEFT, fill=tk.BOTH)
+
+        self.canvas = tk.Canvas(left, width=820, height=600,
+                                bg="#0D0D2B", highlightthickness=0)
+        self.canvas.pack(padx=10, pady=10)
+
+        # Controls hint
+        hint = tk.Label(left,
+                        text="← → Move   |   Space / ↑ Jump   |   A/D Antigravity   |   Collect orbs!",
+                        bg="#0A0A1A", fg="#556677",
+                        font=("Courier", 9))
+        hint.pack()
+
+        # Right panel – avatar editor
+        right = tk.Frame(root, bg="#111122", width=260)
+        right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(0, 10), pady=10)
+        right.pack_propagate(False)
+
+        tk.Label(right, text="✦ AVATAR EDITOR ✦",
+                 bg="#111122", fg="#00FFAA",
+                 font=("Courier", 13, "bold")).pack(pady=(14, 6))
+
+        # Scrollable inner frame
+        canvas_scroll = tk.Canvas(right, bg="#111122",
+                                  highlightthickness=0, width=240)
+        scrollbar = ttk.Scrollbar(right, orient="vertical",
+                                  command=canvas_scroll.yview)
+        canvas_scroll.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas_scroll.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        inner = tk.Frame(canvas_scroll, bg="#111122")
+        win_id = canvas_scroll.create_window((0, 0), window=inner, anchor="nw")
+
+        def _resize(event):
+            canvas_scroll.configure(scrollregion=canvas_scroll.bbox("all"))
+            canvas_scroll.itemconfig(win_id, width=canvas_scroll.winfo_width())
+        inner.bind("<Configure>", _resize)
+
+        self._build_editor(inner)
+
+        # Bind keys
+        self.root.bind("<KeyPress>", self._key_down)
+        self.root.bind("<KeyRelease>", self._key_up)
+
+    def _build_editor(self, parent):
+        pad = {"padx": 10, "pady": 3}
+
+        def section(label):
+            tk.Label(parent, text=label, bg="#111122", fg="#8899BB",
+                     font=("Courier", 9, "bold")).pack(**pad, anchor="w")
+
+        def color_btn(label, attr):
+            row = tk.Frame(parent, bg="#111122")
+            row.pack(fill=tk.X, **pad)
+            tk.Label(row, text=label, bg="#111122", fg="#CCCCCC",
+                     font=("Courier", 9), width=16, anchor="w").pack(side=tk.LEFT)
+            btn = tk.Button(row, text="  ", width=3,
+                            bg=getattr(self.appearance, attr),
+                            relief=tk.FLAT, cursor="hand2",
+                            command=lambda a=attr, b=None: self._pick_color(a, b))
+            # store ref so we can update bg
+            btn.config(command=lambda a=attr, b=btn: self._pick_color(a, b))
+            btn.pack(side=tk.LEFT)
+            setattr(self, f"_btn_{attr}", btn)
+
+        def option_row(label, attr, choices):
+            row = tk.Frame(parent, bg="#111122")
+            row.pack(fill=tk.X, **pad)
+            tk.Label(row, text=label, bg="#111122", fg="#CCCCCC",
+                     font=("Courier", 9), width=16, anchor="w").pack(side=tk.LEFT)
+            var = tk.StringVar(value=getattr(self.appearance, attr))
+            setattr(self, f"_var_{attr}", var)
+            cb = ttk.Combobox(row, textvariable=var, values=choices,
+                              width=10, state="readonly")
+            cb.pack(side=tk.LEFT)
+            cb.bind("<<ComboboxSelected>>",
+                    lambda e, a=attr, v=var: self._set_attr(a, v.get()))
+
+        def slider_row(label, attr, lo, hi):
+            row = tk.Frame(parent, bg="#111122")
+            row.pack(fill=tk.X, **pad)
+            tk.Label(row, text=label, bg="#111122", fg="#CCCCCC",
+                     font=("Courier", 9), width=16, anchor="w").pack(side=tk.LEFT)
+            var = tk.DoubleVar(value=getattr(self.appearance, attr))
+            setattr(self, f"_var_{attr}", var)
+            sl = ttk.Scale(row, from_=lo, to=hi, variable=var, orient="horizontal",
+                           length=100,
+                           command=lambda v, a=attr, sv=var: self._set_attr(a, float(v)))
+            sl.pack(side=tk.LEFT)
+
+        # Name
+        section("● IDENTITY")
+        row = tk.Frame(parent, bg="#111122")
+        row.pack(fill=tk.X, **pad)
+        tk.Label(row, text="Name", bg="#111122", fg="#CCCCCC",
+                 font=("Courier", 9), width=16, anchor="w").pack(side=tk.LEFT)
+        self._var_name = tk.StringVar(value=self.appearance.name)
+        entry = tk.Entry(row, textvariable=self._var_name,
+                         bg="#1E1E3A", fg="#00FFAA",
+                         insertbackground="#00FFAA",
+                         font=("Courier", 9), width=13, relief=tk.FLAT)
+        entry.pack(side=tk.LEFT)
+        entry.bind("<KeyRelease>",
+                   lambda e: self._set_attr("name", self._var_name.get()))
+
+        # Appearance
+        section("● APPEARANCE")
+        color_btn("Skin Color", "skin_color")
+        color_btn("Hair Color", "hair_color")
+        color_btn("Eye Color", "eye_color")
+        option_row("Hair Style", "hair_style",
+                   ["bald", "short", "long", "curly"])
+        option_row("Body Type", "body_type",
+                   ["slim", "medium", "athletic"])
+        slider_row("Height", "height", 0.6, 1.4)
+
+        # Outfit
+        section("● OUTFIT")
+        color_btn("Outfit Color", "outfit_color")
+        color_btn("Accessory Color", "accessory_color")
+        option_row("Accessory", "accessory",
+                   ["none", "hat", "glasses", "wings", "halo"])
+
+        # Effects
+        section("● SPECIAL FX")
+        option_row("Effect", "special_effect",
+                   ["none", "glow", "fire", "ice", "star"])
+
+        # Score & Energy
+        section("● STATUS")
+        self._lbl_score = tk.Label(parent, text="Score: 0",
+                                   bg="#111122", fg="#FFD700",
+                                   font=("Courier", 10, "bold"))
+        self._lbl_score.pack(**pad, anchor="w")
+        self._lbl_energy = tk.Label(parent, text="Antigravity: 100%",
+                                    bg="#111122", fg="#00FFAA",
+                                    font=("Courier", 10))
+        self._lbl_energy.pack(**pad, anchor="w")
+
+        # Antigravity slider
+        section("● ANTIGRAVITY")
+        row = tk.Frame(parent, bg="#111122")
+        row.pack(fill=tk.X, **pad)
+        tk.Label(row, text="Power", bg="#111122", fg="#CCCCCC",
+                 font=("Courier", 9), width=8, anchor="w").pack(side=tk.LEFT)
+        self._var_ag = tk.DoubleVar(value=0.0)
+        ttk.Scale(row, from_=0.0, to=1.0, variable=self._var_ag,
+                  orient="horizontal", length=120,
+                  command=lambda v: setattr(self.physics,
+                                            "antigravity_level",
+                                            float(v))).pack(side=tk.LEFT)
+
+        # Buttons
+        tk.Frame(parent, bg="#111122", height=6).pack()
+        btn_style = {"bg": "#1A3A5A", "fg": "#00FFAA",
+                     "font": ("Courier", 9, "bold"),
+                     "relief": tk.FLAT, "cursor": "hand2",
+                     "activebackground": "#00FFAA",
+                     "activeforeground": "#0A0A1A",
+                     "pady": 5}
+        tk.Button(parent, text="💾  SAVE AVATAR",
+                  command=self._save_avatar, **btn_style).pack(
+            fill=tk.X, padx=10, pady=2)
+        tk.Button(parent, text="🔄  LOAD AVATAR",
+                  command=self._load_avatar, **btn_style).pack(
+            fill=tk.X, padx=10, pady=2)
+        tk.Button(parent, text="🎲  RANDOMIZE",
+                  command=self._randomize, **btn_style).pack(
+            fill=tk.X, padx=10, pady=2)
+        tk.Button(parent, text="🔁  RESET WORLD",
+                  command=self._reset_world, **btn_style).pack(
+            fill=tk.X, padx=10, pady=2)
+
+    # ── HELPERS ─────────────────────────────
+    def _pick_color(self, attr: str, btn: Optional[tk.Button]):
+        init = getattr(self.appearance, attr)
+        _, hex_color = colorchooser.askcolor(color=init,
+                                             title=f"Choose {attr.replace('_', ' ').title()}")
+        if hex_color:
+            setattr(self.appearance, attr, hex_color)
+            if btn:
+                btn.config(bg=hex_color)
+
+    def _set_attr(self, attr: str, value):
+        setattr(self.appearance, attr, value)
+
+    def _save_avatar(self):
+        data = asdict(self.appearance)
+        with open(self.SAVE_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+        messagebox.showinfo("Saved", f"Avatar saved to {self.SAVE_FILE}")
+
+    def _load_avatar(self):
+        if os.path.exists(self.SAVE_FILE):
+            with open(self.SAVE_FILE) as f:
+                data = json.load(f)
+            for k, v in data.items():
+                if hasattr(self.appearance, k):
+                    setattr(self.appearance, k, v)
+            self._sync_editor()
+
+    def _sync_editor(self):
+        """Push loaded appearance back to editor widgets."""
+        for attr in ("name", "hair_style", "body_type",
+                     "accessory", "special_effect", "height"):
+            var = getattr(self, f"_var_{attr}", None)
+            if var:
+                var.set(getattr(self.appearance, attr))
+        for attr in ("skin_color", "hair_color", "eye_color",
+                     "outfit_color", "accessory_color"):
+            btn = getattr(self, f"_btn_{attr}", None)
+            if btn:
+                btn.config(bg=getattr(self.appearance, attr))
+
+    def _randomize(self):
+        colors = [f"#{random.randint(0, 0xFFFFFF):06X}" for _ in range(5)]
+        self.appearance.skin_color = colors[0]
+        self.appearance.hair_color = colors[1]
+        self.appearance.eye_color = colors[2]
+        self.appearance.outfit_color = colors[3]
+        self.appearance.accessory_color = colors[4]
+        self.appearance.hair_style = random.choice(["bald", "short", "long", "curly"])
+        self.appearance.body_type = random.choice(["slim", "medium", "athletic"])
+        self.appearance.accessory = random.choice(["none", "hat", "glasses", "wings", "halo"])
+        self.appearance.special_effect = random.choice(["none", "glow", "fire", "ice", "star"])
+        self.appearance.height = round(random.uniform(0.7, 1.3), 2)
+        self._sync_editor()
+
+    def _reset_world(self):
+        self.physics = PhysicsState(x=200, y=480)
+        self._score = 0
+        self._antigravity_energy = 100.0
+        for orb in self.world.energy_orbs:
+            orb[2] = True
+
+    # ── INPUT ────────────────────────────────
+    def _key_down(self, event):
+        self._keys.add(event.keysym.lower())
+        if event.keysym in ("space", "Up"):
+            if self.physics.on_ground or self.physics.antigravity_level > 0.3:
+                self.engine.apply_boost(self.physics)
+
+    def _key_up(self, event):
+        self._keys.discard(event.keysym.lower())
+
+    def _handle_input(self):
+        keys = self._keys
+        speed = 4.5 * (1 + self.physics.antigravity_level * 0.5)
+
+        if "left" in keys or "a" in keys:
+            self.physics.vx -= speed
+        if "right" in keys or "d" in keys:
+            self.physics.vx += speed
+
+        # Antigravity ramp
+        if "q" in keys:
+            self.physics.antigravity_level = min(
+                1.0, self.physics.antigravity_level + 0.02)
+            self._var_ag.set(self.physics.antigravity_level)
+        if "e" in keys:
+            self.physics.antigravity_level = max(
+                0.0, self.physics.antigravity_level - 0.02)
+            self._var_ag.set(self.physics.antigravity_level)
+
+    # ── DRAW WORLD ───────────────────────────
+    def _draw_world(self):
+        c = self.canvas
+        c.delete("world")
+
+        # Stars background
+        for sx, sy in getattr(self, "_stars",
+                               [(random.randint(0, 820),
+                                 random.randint(0, 540))
+                                for _ in range(120)]):
+            c.create_oval(sx - 1, sy - 1, sx + 1, sy + 1,
+                          fill="#FFFFFF", outline="", tags="world")
+        if not hasattr(self, "_stars"):
+            self._stars = [(random.randint(0, 820),
+                            random.randint(0, 540))
+                           for _ in range(120)]
+
+        # Ground
+        c.create_rectangle(0, self.world.ground_y, 820, 600,
+                            fill="#0A1A0A", outline="#00FF55",
+                            width=2, tags="world")
+
+        # Platforms
+        for px, py, pw, ph in self.world.platforms:
+            c.create_rectangle(px, py, px + pw, py + ph,
+                                fill="#1A2A4A", outline="#3A6AFF",
+                                width=2, tags="world")
+            # glow
+            c.create_rectangle(px + 2, py + 2, px + pw - 2, py + ph - 2,
+                                fill="", outline="#6A9AFF",
+                                width=1, tags="world")
+
+        # Energy orbs
+        t = time.time()
+        for orb in self.world.energy_orbs:
+            ox, oy, active = orb
+            if active:
+                pulse = math.sin(t * 4 + ox) * 4
+                r = 10 + pulse
+                c.create_oval(ox - r, oy - r, ox + r, oy + r,
+                              fill="#00FFAA", outline="#FFFFFF",
+                              width=1, tags="world")
+                c.create_oval(ox - r * 0.5, oy - r * 0.5,
+                              ox + r * 0.5, oy + r * 0.5,
+                              fill="#FFFFFF", outline="", tags="world")
+
+        # Antigravity field effect when active
+        if self.physics.antigravity_level > 0.1:
+            alpha_factor = self.physics.antigravity_level
+            c.create_oval(
+                self.physics.x - 60 * alpha_factor,
+                self.physics.y - 80 * alpha_factor,
+                self.physics.x + 60 * alpha_factor,
+                self.physics.y + 40 * alpha_factor,
+                fill="", outline="#00FFAA",
+                width=int(2 * alpha_factor + 1),
+                dash=(4, 4), tags="world")
+
+        # HUD
+        c.create_text(12, 12, text=f"✦ {self.appearance.name}",
+                      fill="#00FFAA", font=("Courier", 12, "bold"),
+                      anchor="nw", tags="world")
+        c.create_text(12, 32, text=f"Score: {self._score}",
+                      fill="#FFD700", font=("Courier", 10),
+                      anchor="nw", tags="world")
+        ag_pct = int(self.physics.antigravity_level * 100)
+        c.create_text(12, 50, text=f"AntiGrav: {ag_pct}%",
+                      fill="#4AF", font=("Courier", 10),
+                      anchor="nw", tags="world")
+        c.create_text(12, 68, text="Q/E: adjust antigravity",
+                      fill="#445566", font=("Courier", 8),
+                      anchor="nw", tags="world")
+
+    # ── ORB COLLECTION ───────────────────────
+    def _check_orbs(self):
+        for orb in self.world.energy_orbs:
+            ox, oy, active = orb
+            if active and abs(self.physics.x - ox) < 20 and abs(self.physics.y - oy) < 20:
+                orb[2] = False
+                self._score += 10
+                self._antigravity_energy = min(100, self._antigravity_energy + 20)
+                self._lbl_score.config(text=f"Score: {self._score}")
+
+    # ── MAIN LOOP ────────────────────────────
+    renderer: Optional[AvatarRenderer] = None
+
+    def _start_loop(self):
+        self.renderer = AvatarRenderer(self.canvas)
+        self._loop()
+
+    def _loop(self):
+        if not self._running:
+            return
+        self._handle_input()
+        self.engine.step(self.physics)
+        self._check_orbs()
+        self._draw_world()
+        self.renderer.draw(self.appearance, self.physics)
+        self._lbl_energy.config(
+            text=f"AntiGrav: {int(self.physics.antigravity_level * 100)}%")
+        self.root.after(int(1000 / AntigravityEngine.FPS), self._loop)
+
+    def _on_close(self):
+        self._running = False
+        self.root.destroy()
+
+
+# ─────────────────────────────────────────────
+#  ENTRY POINT
+# ─────────────────────────────────────────────
+
+if __name__ == "__main__":
+    MetaUniverseApp()
